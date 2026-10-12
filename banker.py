@@ -55,6 +55,7 @@ play_monopoly = True
 monopoly_unit_test = 6 # assume 1 player, 2 owned properties. See monopoly.py unittest for more options
 messages = []
 DEBT_OK = False
+disconnected_ids = set() # this is the ids of players who have left the game
 
 def add_to_output_area(output_type: str, text: str, color: str = COLORS.WHITE) -> None:
     """
@@ -165,6 +166,8 @@ def receiver_loop(port:int, is_oof_thread: bool = False) -> None:
         server.listen()
         # Credit to https://stackoverflow.com/a/43151772/19535084 for seamless server-client handling.
         to_read = [server]  # add server to list of readable sockets.
+        addresses = {} # socket to address, so we log the address of the player who actually left
+        socket_ids = {} # socket to player id, learned from the id prefix on each message
         while True:
             # check for a connection to the server or data ready from clients.
             # readers will be empty on timeout.
@@ -175,15 +178,34 @@ def receiver_loop(port:int, is_oof_thread: bool = False) -> None:
                     if not is_oof_thread:
                         add_to_output_area("Main", f"Player connected from: {address[0]}", COLORS.GREEN)
                     to_read.append(player) # add client to list of readable sockets
+                    addresses[player] = address
+
+
                 else:
                     try:
                         data = net.receive_message(reader)
+                        if len(data) > 0:
+                            if data[0].isdigit():
+                                socket_ids[reader] = int(data[0])
                         handle_data(data, reader)
-                    except ConnectionResetError:
-                        if not is_oof_thread:
-                            add_to_output_area("Main", f"Player at {address[0]} disconnected.", COLORS.RED)
+                    except ConnectionError:
                         to_read.remove(reader) # remove from monitoring
+                        reader.close()
 
+                        pid = None
+                        if reader in socket_ids:
+                            pid = socket_ids[reader]
+                            del socket_ids[reader]
+
+                        ip = "unknown"
+                        if reader in addresses:
+                            ip = addresses[reader][0]
+                            del addresses[reader]
+
+                        if not is_oof_thread:
+                            add_to_output_area("Main", "Player at " + ip + " disconnected.", COLORS.RED)
+                            if pid is not None:
+                                handle_disconnect(pid)
                         # TODO send a message to each player to query who is still connected, then properly remove
                         # the disconnected player from the game. Currently only removing the first player in clients list. 
                         # clients.pop(0)
@@ -201,6 +223,21 @@ def receiver_loop(port:int, is_oof_thread: bool = False) -> None:
                             # Reopen the server socket
                             server_socket.close()
                             start_server()
+
+def handle_disconnect(pid: int) -> None:
+    """Marks a player as disconnected so the game skips their turns instead of crashing."""
+    if pid in disconnected_ids or pid >= len(clients):
+        return
+    disconnected_ids.add(pid)
+    add_to_output_area("Main", f"{clients[pid].name} left the game.", COLORS.RED)
+    for i, other in enumerate(clients):
+        if i not in disconnected_ids:
+            try:
+                net.send_notif(other.socket, f"{clients[pid].name} left the game.")
+            except OSError: # that player may also be gone, the receiver will catch it
+                pass
+    if play_monopoly and mply.turn == pid: # they quit on their own turn, so pass it on
+        mply.end_turn()
 
 def set_unittest() -> None:
     """
@@ -615,6 +652,12 @@ def monopoly_controller(unit_test) -> None:
     last_turn = 0
     while True:
         sleep(1)
+        if len(disconnected_ids) >= len(clients):
+            add_to_output_area("Monopoly", "All players have left. Ending Monopoly.")
+            return
+        if mply.turn in disconnected_ids:
+            mply.end_turn() # Skip players who have left
+            continue
         if mply.turn != last_turn:
             # if disconnect, move to next player
             try:

@@ -82,6 +82,8 @@ def receive_message(other: socket.socket) -> str:
     new_msg = True
     while True:
         msg = other.recv(16)
+        if not msg: #empty read means that the player closed the connection.
+            raise ConnectionResetError("Connection closed by peer")
         if new_msg:
             msglen = int(msg[:HEADERSIZE])
             new_msg = False
